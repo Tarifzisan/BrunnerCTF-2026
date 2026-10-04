@@ -4,7 +4,6 @@
 **Difficulty:** Beginner
 **Author:** Quack
 
-**Challenge:** [BOREd2root (Root)](https://global.brunnerctf.dk/challenges#BOREd2root%20%28Root%29-135)
 
 > This challenge should be solved after completing **BOREd2root (User)**.
 
