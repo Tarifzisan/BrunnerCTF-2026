@@ -4,52 +4,30 @@
 **Difficulty:** Easy-Medium
 **Flag:** `brunner{y0ur_kp1s_ar3_n0t_l00king_gr8_buddy}`
 
----
-
 ## Challenge
 
-We're given a binary called `kpiman`.
+We're given a binary, `kpiman`, that prompts for an "employee ID" and reports a
+productivity score. Exactly one input yields 100%.
 
-The program asks for an **employee ID** and calculates a productivity score. Apparently, exactly one input achieves **100% productivity**.
-
-```text
+```
 $ ./kpiman
-
 BrunnerCorp KPIman v3.1
 Enter employee ID: AAAA
 Analyzing synergy...
 Productivity: 0%. Have you considered a career in cake tasting?
 ```
 
-Our goal is to reverse engineer the binary and recover the valid 44-byte input.
+## Triage
 
----
-
-## 1. Initial Triage
-
-First, identify the binary:
-
-```bash
-file kpiman
 ```
-
-Output:
-
-```text
+$ file kpiman
 kpiman: ELF 64-bit LSB executable, x86-64, ... not stripped
 ```
 
-The binary is **not stripped**, which is useful because function and variable names are still present.
+Not stripped, so symbol names survive. `strings` immediately shows the
+interesting function names and format strings:
 
-Let's inspect the strings:
-
-```bash
-strings kpiman
 ```
-
-Among the interesting strings/functions we find:
-
-```text
 calculateSynergy
 measureVelocity
 assessAlignment
@@ -60,352 +38,125 @@ synergy_table
 Productivity: 100%%. Finally, someone who gets it.
 ```
 
-This immediately gives us some useful clues:
+That's a strong hint: three check functions, three "scoring" globals, and a
+lookup table.
 
-* Three validation functions
-* Three KPI-related data arrays
-* A substitution table
-* A success condition
+## Reading `main`
 
-So instead of brute-forcing the employee ID, we can reverse each validation function independently.
+Disassembling with `objdump -d -M intel kpiman` and looking at `main`:
 
----
+1. Reads a line with `fgets` into a 256-byte stack buffer, strips the
+   trailing newline (`strcspn`).
+2. Requires `strlen(input) == 0x2c` (44) — otherwise prints
+   "Wrong badge length." and exits.
+3. Calls `calculateSynergy(input)`, `measureVelocity(input)`,
+   `assessAlignment(input)` — each returns 0 or 1.
+4. Sums the three results. Only if the sum is **3** (i.e. all three functions
+   return 1) does it print `Productivity: 100%%` and the promotion code
+   (simply `printf("%s", input)` — the flag *is* the valid input).
 
-# 2. Understanding `main`
+So the job is: find the unique 44-byte string that satisfies all three
+checks independently. Each function only touches a disjoint 14–15 byte slice
+of the input, so the three checks can be solved separately and concatenated.
 
-Using `objdump`:
-
-```bash
-objdump -d -M intel kpiman
-```
-
-Looking at `main`, we can determine the following logic:
-
-1. Reads user input using `fgets()`.
-2. Removes the trailing newline using `strcspn()`.
-3. Requires the input length to be exactly `0x2c` bytes.
-
-```text
-0x2c = 44
-```
-
-4. Calls three validation functions:
-
-```c
-calculateSynergy(input);
-measureVelocity(input);
-assessAlignment(input);
-```
-
-5. Each function returns either `0` or `1`.
-6. Their results are added together.
-7. Only when the result is `3` does the program print the 100% productivity message.
-
-Conceptually:
-
-```c
-score =
-    calculateSynergy(input) +
-    measureVelocity(input) +
-    assessAlignment(input);
-
-if (score == 3) {
-    printf("Productivity: 100%%. Finally, someone who gets it.");
-    printf("Promotion code: %s", input);
-}
-```
-
-Therefore, we need an input that satisfies **all three checks**.
-
-The important observation is that the checks operate on separate portions of the 44-byte input.
-
-```text
-Bytes 0  - 14  → calculateSynergy
-Bytes 15 - 29  → measureVelocity
-Bytes 30 - 43  → assessAlignment
-```
-
-So the problem can be solved in three independent stages.
-
----
-
-# 3. `calculateSynergy` — Bytes 0–14
-
-The first function checks the first 15 bytes.
-
-A simplified version of the logic is:
+## `calculateSynergy` — bytes 0–14 (15 bytes)
 
 ```c
 for (i = 0; i <= 14; i++) {
-    key = (i * 8 - i) + 42;
-
+    key = (i*8 - i) + 42;          // == i*7 + 42, masked to a byte
     if ((input[i] ^ (uint8_t)key) != kpi_alpha[i])
         return 0;
 }
-
 return 1;
 ```
 
-Since:
+`kpi_alpha` is a 15-byte array taken straight from `.rodata` at `0x402020`.
+This is a simple keyed XOR, trivially invertible:
 
-```text
-i * 8 - i = i * 7
+```
+input[i] = kpi_alpha[i] ^ ((i*7 + 42) & 0xFF)
 ```
 
-the key is:
-
-```text
-key = i * 7 + 42
-```
-
-The comparison is:
-
-```text
-input[i] XOR key == kpi_alpha[i]
-```
-
-XOR is reversible, so:
-
-```text
-input[i] = kpi_alpha[i] XOR key
-```
-
-Therefore:
-
-```python
-for i in range(15):
-    input_bytes[i] = kpi_alpha[i] ^ ((i * 7 + 42) & 0xff)
-```
-
-The `kpi_alpha` array can be recovered from `.rodata`.
-
----
-
-# 4. `measureVelocity` — Bytes 15–29
-
-The second function handles bytes `15` through `29`.
-
-Its logic is:
+## `measureVelocity` — bytes 15–29 (15 bytes)
 
 ```c
 for (i = 15; i <= 29; i++) {
-    sum = input[i] + input[i - 1];
-
-    if (sum != kpi_beta[i - 15])
+    sum = input[i] + input[i-1];
+    if (sum != kpi_beta[i-15])      // kpi_beta is an int[15] array
         return 0;
 }
-
 return 1;
 ```
 
-Here, every byte depends on the previous byte.
+`kpi_beta` (at `0x402040`) gives the *sum* of each byte with its predecessor.
+Since `input[14]` is already known from the previous stage, this chains
+forward byte by byte:
 
-Rearranging:
-
-```text
-input[i] + input[i-1] = kpi_beta[i-15]
+```
+input[i] = kpi_beta[i-15] - input[i-1]   for i = 15..29
 ```
 
-Therefore:
-
-```text
-input[i] = kpi_beta[i-15] - input[i-1]
-```
-
-We already know `input[14]` from the first stage, so we can solve the remaining bytes sequentially.
-
-```python
-for i in range(15, 30):
-    input_bytes[i] = (
-        kpi_beta[i - 15] - input_bytes[i - 1]
-    ) & 0xff
-```
-
-This gives us bytes `15–29`.
-
----
-
-# 5. `assessAlignment` — Bytes 30–43
-
-The final function checks bytes `30` through `43`.
-
-The relevant logic is:
+## `assessAlignment` — bytes 30–43 (14 bytes)
 
 ```c
 for (i = 30; i <= 43; i++) {
-    if (synergy_table[input[i]] != kpi_gamma[i - 30])
+    if (synergy_table[input[i]] != kpi_gamma[i-30])
         return 0;
 }
-
 return 1;
 ```
 
-Here, `synergy_table` is a 256-byte substitution table.
+`synergy_table` (at `0x402080`... actually `0x4020a0`) is a 256-byte
+substitution box used as `table[input_byte] -> output_byte`. Since it's a
+bijection (full 0–255 permutation), it can be inverted into a lookup
+`output_byte -> input_byte`, and each target byte in `kpi_gamma` (14 bytes,
+at `0x402080`) maps straight back to the original input byte.
 
-The relationship is:
+## Solving
 
-```text
-synergy_table[input[i]] = kpi_gamma[i-30]
-```
-
-The table contains a complete permutation of values `0x00–0xff`, meaning every output has exactly one corresponding input.
-
-Therefore, we can construct an inverse lookup table:
-
-```python
-inv_sbox = {
-    value: index
-    for index, value in enumerate(synergy_table)
-}
-```
-
-Then:
+Dumped the four `.rodata` blobs with `objdump -s -j .rodata` and reimplemented
+the three inverses in Python:
 
 ```python
-for i in range(30, 44):
-    input_bytes[i] = inv_sbox[kpi_gamma[i - 30]]
-```
-
-This recovers the final 14 bytes.
-
----
-
-# 6. Solving Everything
-
-The four relevant `.rodata` regions can be dumped with:
-
-```bash
-objdump -s -j .rodata kpiman
-```
-
-After extracting:
-
-* `kpi_alpha`
-* `kpi_beta`
-* `kpi_gamma`
-* `synergy_table`
-
-we can reproduce the validation logic in Python.
-
-```python
-# kpi_alpha stage — bytes 0-14
+# kpi_alpha stage (bytes 0-14)
 for i in range(15):
-    input_bytes[i] = kpi_alpha[i] ^ ((i * 7 + 42) & 0xff)
+    input_bytes[i] = kpi_alpha[i] ^ ((i*7 + 42) & 0xFF)
 
-
-# kpi_beta stage — bytes 15-29
-# Starts from the previously recovered input[14]
+# kpi_beta stage (bytes 15-29), chained off input[14]
 for i in range(15, 30):
-    input_bytes[i] = (
-        kpi_beta[i - 15] - input_bytes[i - 1]
-    ) & 0xff
+    input_bytes[i] = (kpi_beta[i-15] - input_bytes[i-1]) & 0xFF
 
-
-# synergy_table stage — bytes 30-43
-# Build inverse substitution table
-inv_sbox = {
-    value: index
-    for index, value in enumerate(synergy_table)
-}
-
+# synergy_table stage (bytes 30-43), inverse S-box lookup
+inv_sbox = {v: k for k, v in enumerate(synergy_table)}
 for i in range(30, 44):
-    input_bytes[i] = inv_sbox[kpi_gamma[i - 30]]
+    input_bytes[i] = inv_sbox[kpi_gamma[i-30]]
 ```
 
-Finally:
+Concatenating the 44 bytes decodes cleanly as ASCII:
 
-```python
-flag = bytes(input_bytes)
-print(flag.decode())
 ```
-
-Output:
-
-```text
 brunner{y0ur_kp1s_ar3_n0t_l00king_gr8_buddy}
 ```
 
----
+## Verification
 
-# 7. Verification
-
-Let's test the recovered value against the binary:
-
-```bash
-echo "brunner{y0ur_kp1s_ar3_n0t_l00king_gr8_buddy}" | ./kpiman
 ```
-
-Output:
-
-```text
+$ echo "brunner{y0ur_kp1s_ar3_n0t_l00king_gr8_buddy}" | ./kpiman
 BrunnerCorp KPIman v3.1
 Enter employee ID: Analyzing synergy...
 Productivity: 100%. Finally, someone who gets it.
 Promotion code: brunner{y0ur_kp1s_ar3_n0t_l00king_gr8_buddy}
 ```
 
-The recovered input successfully passes all three checks.
+100%, as promised.
 
-```text
-Productivity: 100%
-```
+## Takeaways
 
----
-
-# Flag
-
-```text
-brunner{y0ur_kp1s_ar3_n0t_l00king_gr8_buddy}
-```
-
----
-
-# Takeaways
-
-This challenge initially looks more complicated because the binary has three separate KPI checks, but each one is based on a simple reversible transformation.
-
-### `calculateSynergy`
-
-A simple XOR transformation:
-
-```text
-cipher = plaintext XOR key
-```
-
-which can be reversed using XOR again.
-
-### `measureVelocity`
-
-A chained addition:
-
-```text
-input[i] + input[i-1] = target
-```
-
-which can be solved sequentially once the first byte is known.
-
-### `assessAlignment`
-
-A substitution box:
-
-```text
-SBOX[input] = target
-```
-
-which can be reversed by constructing the inverse S-box.
-
-The biggest shortcut was noticing that the binary was **not stripped**. The surviving symbol names immediately revealed the intended structure:
-
-```text
-calculateSynergy
-measureVelocity
-assessAlignment
-kpi_alpha
-kpi_beta
-kpi_gamma
-synergy_table
-```
-
-Rather than brute-forcing a 44-byte input, we can split the problem into three small, independently invertible constraints.
-
-**No real cryptography — just reverse engineering the transformations.** 🔍
+- The three "KPI" checks look intimidating together but are each a
+  textbook-simple, *independently invertible* transform (XOR with a
+  keystream, a running-sum chain, and a substitution box) operating on
+  disjoint slices of the input — classic easy-medium RE design: lots of
+  surface area, no real cryptographic difficulty once decomposed.
+- Keeping the binary unstripped made the intended structure obvious from
+  symbol names alone, which is a good signal to immediately split the
+  problem into independent sub-constraints rather than brute-forcing.
