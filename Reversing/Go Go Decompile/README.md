@@ -1,103 +1,207 @@
-# Go Go Decompile — Reversing / Easy
+# Go Go Decompile
 
 **Category:** Reversing
+**Difficulty:** Easy
 **Points:** 100
 **Author:** Quack
 
 ## Challenge
 
-> Uh oh, I've been crunching numbers all month in `Go Go BudgetMaster`, but the cleaning crew accidentally threw out my license key Post-it. Now management's breathing down my neck about the budget.
-> Maybe I can use that magic dragon program our security guy keeps blabbing about at lunch?
+> Uh oh, I've been crunching numbers all month in `Go Go BudgetMaster`, but the cleaning crew accidentally threw out my license key Post-it. Now management's breathing down my neck about the budget. Maybe I can use that magic dragon program our security guy keeps blabbing about at lunch?
 
-We're given a single binary, `go_go_budgetmaster`, and need to recover a license key to make it print a success message.
+We are given a single binary:
+
+```text
+go_go_budgetmaster
+```
+
+The goal is to recover the license key that makes the program print the success message.
+
+---
 
 ## Recon
 
-```console
-$ file go_go_budgetmaster
-go_go_budgetmaster: ELF 64-bit LSB executable, x86-64, version 1 (SYSV),
-statically linked, with debug_info, not stripped
-```
+First, identify the binary:
 
-Statically-linked, unstripped Go binary. "The magic dragon program" is Ghidra — but a Go-aware disassembler isn't strictly necessary here; `objdump` gets us there just fine.
-
-A quick symbol dump confirms this is a plain Go program with no custom packages — only `main.main` survived as a distinct symbol, since the Go compiler/linker inlined everything else straight into it:
-
-```console
-$ nm go_go_budgetmaster | grep ' T main\.'
-00000000004a1f80 T main.main
-```
-
-So the entire challenge logic lives in one function.
-
-## Static Analysis
-
-Disassembling `main.main`:
-
-```console
-$ objdump -d --disassemble=main.main -M intel go_go_budgetmaster
-```
-
-Reading through it, the control flow is refreshingly linear — no hidden branches, no anti-debug tricks:
-
-1. **Print a prompt** via `os.Stdout.WriteString` using a string at `0x4c6fe6` (15 bytes).
-2. **Read one line** from stdin with `bufio.NewScanner` / `Scan` / `Text`.
-3. **Base64-decode** a hardcoded blob at `0x4cc9e8` (40 bytes) using `encoding/base64.StdEncoding.Decode`.
-4. **Compare** the decoded bytes against your input via `runtime.memequal`.
-5. Branch to one of two hardcoded strings depending on the result (`0x4cca10` on success, `0x4cc72a` on failure).
-
-No hashing, no obfuscation, no key-derivation — just `input == base64_decode(blob)`.
-
-## Pulling the Strings
-
-Since the binary isn't stripped and nothing is encrypted, the blob can be read straight out of `.rodata` by mapping virtual addresses to file offsets (`ELF_vaddr - load_bias`, confirmed against `readelf -S`):
-
-```python
-with open('go_go_budgetmaster', 'rb') as f:
-    data = f.read()
-
-def read_str(vaddr, length):
-    off = vaddr - 0x400000
-    return data[off:off+length]
-
-print(read_str(0x4c6fe6, 0xf))   # prompt
-print(read_str(0x4cc9e8, 0x28))  # base64 blob
-print(read_str(0x4cca10, 0x28))  # success message
-print(read_str(0x4cc72a, 0x27))  # failure message
+```bash
+file go_go_budgetmaster
 ```
 
 Output:
 
+```text
+go_go_budgetmaster: ELF 64-bit LSB executable, x86-64, version 1 (SYSV),
+statically linked, with debug_info, not stripped
 ```
+
+This is a **statically linked, unstripped Go binary**.
+
+The challenge mentions a "magic dragon program", which is likely a reference to **Ghidra**. However, because the binary is unstripped and contains debug information, basic tools such as `nm` and `objdump` are enough.
+
+Let's inspect the symbols:
+
+```bash
+nm go_go_budgetmaster | grep ' T main\.'
+```
+
+Output:
+
+```text
+00000000004a1f80 T main.main
+```
+
+The main challenge logic is contained inside `main.main`.
+
+---
+
+## Static Analysis
+
+Disassemble `main.main`:
+
+```bash
+objdump -d --disassemble=main.main -M intel go_go_budgetmaster
+```
+
+The control flow is fairly straightforward.
+
+The important operations are:
+
+1. Print the license prompt.
+2. Read one line from standard input.
+3. Base64-decode a hardcoded string.
+4. Compare the decoded bytes with the supplied input.
+5. Print either the success or failure message.
+
+The comparison is performed using:
+
+```text
+runtime.memequal
+```
+
+So there is no password hashing, encryption, or complicated key derivation.
+
+Conceptually, the program is doing:
+
+```text
+input == base64_decode(hardcoded_blob)
+```
+
+Therefore, recovering the license key only requires extracting the Base64 string and decoding it.
+
+---
+
+## Extracting the Strings
+
+The hardcoded strings are stored in `.rodata`.
+
+The relevant virtual addresses are:
+
+```text
+Prompt:   0x4c6fe6
+Blob:     0x4cc9e8
+Success:  0x4cca10
+Failure:  0x4cc72a
+```
+
+Since the binary uses a load bias of `0x400000`, the file offset can be calculated as:
+
+```text
+file_offset = virtual_address - 0x400000
+```
+
+A small Python script can extract the strings:
+
+```python
+with open("go_go_budgetmaster", "rb") as f:
+    data = f.read()
+
+
+def read_str(vaddr, length):
+    offset = vaddr - 0x400000
+    return data[offset:offset + length]
+
+
+print(read_str(0x4c6fe6, 0xf))
+print(read_str(0x4cc9e8, 0x28))
+print(read_str(0x4cca10, 0x28))
+print(read_str(0x4cc72a, 0x27))
+```
+
+Output:
+
+```text
 prompt:  b'Go Go License? '
 blob:    b'YnJ1bm5lcntnMF9kM2MwbXAxbDNkX2cwX2Jycn0='
 success: b'Correct!\nThis is way better than Excel!\n'
 failure: b'Incorrect!\nAre you sure you work here?\n'
 ```
 
-## Decoding the Flag
+The important value is:
 
-```console
-$ echo YnJ1bm5lcntnMF9kM2MwbXAxbDNkX2cwX2Jycn0= | base64 -d
+```text
+YnJ1bm5lcntnMF9kM2MwbXAxbDNkX2cwX2Jycn0=
+```
+
+---
+
+## Decoding the Base64
+
+Decode it using:
+
+```bash
+echo 'YnJ1bm5lcntnMF9kM2MwbXAxbDNkX2cwX2Jycn0=' | base64 -d
+```
+
+Result:
+
+```text
 brunner{g0_d3c0mp1l3d_g0_brr}
 ```
 
+---
+
 ## Verification
 
-```console
-$ echo 'brunner{g0_d3c0mp1l3d_g0_brr}' | ./go_go_budgetmaster
+Run the binary with the recovered license key:
+
+```bash
+echo 'brunner{g0_d3c0mp1l3d_g0_brr}' | ./go_go_budgetmaster
+```
+
+Output:
+
+```text
 Go Go License? Correct!
 This is way better than Excel!
 ```
 
+The key is correct.
+
+---
+
 ## Flag
 
-```
+```text
 brunner{g0_d3c0mp1l3d_g0_brr}
 ```
 
+---
+
 ## Takeaways
 
-- Unstripped Go binaries dump most of their logic into `main.main`, which makes a quick `objdump -d --disassemble=main.main` a great first move for easy reversing challenges.
-- Always check for a plain equality comparison (`runtime.memequal`) before assuming you need to brute-force or reverse a hash — static strings in `.rodata` can often just be read out directly.
-- `strings` + section-offset math beats firing up a full disassembler when the binary isn't stripped and the logic is this linear.
+* An **unstripped Go binary** can expose useful symbols and debugging information.
+* `nm` is useful for quickly identifying functions such as `main.main`.
+* `objdump` can be enough for simple reversing challenges without opening a full GUI disassembler.
+* Always look for direct comparisons such as `runtime.memequal` before assuming a password is hashed or encrypted.
+* Hardcoded data in `.rodata` can often be extracted directly from the binary.
+* Base64 is **encoding, not encryption**. If a Base64 blob is hardcoded, decoding it may immediately reveal the secret.
+* For simple binaries, a combination of `file`, `nm`, `objdump`, `strings`, and a small Python script can be faster than using a full reverse-engineering framework.
+
+## Tools Used
+
+* `file`
+* `nm`
+* `objdump`
+* Python 3
+* `base64`
+* Ghidra (optional)
