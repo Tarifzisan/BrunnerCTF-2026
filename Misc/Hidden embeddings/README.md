@@ -1,6 +1,6 @@
 # Hidden Embeddings — Writeup
 
-**Category:** ML
+**Category:** Misc
 **Difficulty:** Medium
 **Points:** 100
 
