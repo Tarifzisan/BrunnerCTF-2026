@@ -1,6 +1,6 @@
 # Brunner Mifflin (User) — Writeup
 
-**Category:** Web / Container Escape
+**Category:** Boot2Root
 **Difficulty:** Medium
 **Target:** `Brunner Mifflin (User)`
 
