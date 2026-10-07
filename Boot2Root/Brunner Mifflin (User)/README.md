@@ -533,4 +533,4 @@ The important discoveries are:
 
 The central mistake to avoid is confusing the local Kali filesystem with the remote container filesystem. `/app` belongs to the challenge container and must be accessed through the authenticated terminal.
 
-**Flag:** `brunner{...}`
+**Flag:** `brunner{1tGuyW111F1x}`
